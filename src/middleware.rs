@@ -7,8 +7,6 @@ use std::error::Error;
 
 mod client_communication;
 
-type SheetsClient = Arc<Client<HttpsConnector<hyper::client::HttpConnector>, Body>>;
-
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Load the service account key
