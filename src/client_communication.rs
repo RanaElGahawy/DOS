@@ -2,10 +2,12 @@ use hyper::{Client, Request, Body, Method};
 use hyper_rustls::HttpsConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde_json::json;
 use std::error::Error;
+use std::time::Duration;
+use tokio::time::timeout;
 
 type SheetsClient = Arc<Client<HttpsConnector<hyper::client::HttpConnector>, Body>>;
 
@@ -57,10 +59,10 @@ async fn handle_client(
         Some(&"SHOW_ACTIVE_CLIENTS") => {
             handle_show_active_clients_request(addr, sheets_client, access_token, &mut socket).await
         }
-        // Some(&"UNREACHABLE") if parts.len() > 1 => {
-        //     let client_id = parts[1];
-        //     handle_unreachable_request(client_id, sheets_client, access_token, &mut socket).await
-        // }
+        Some(&"UNREACHABLE") if parts.len() > 1 => {
+            let client_id = parts[1];
+            handle_unreachable_id(client_id, sheets_client, access_token).await
+        }
         _ => {
             eprintln!("Invalid request received: {}", request);
             Ok(())
@@ -68,6 +70,113 @@ async fn handle_client(
     }
 }
 
+async fn handle_unreachable_id(
+    client_id: &str,
+    sheets_client: SheetsClient,
+    access_token: String,
+) -> Result<(), Box<dyn Error>> {
+    // Look up the client ID's associated IP in the Google Sheets
+    let ip = get_client_ip_from_sheets(&sheets_client, access_token.clone(), client_id).await?;
+
+    if let Some(ip) = ip {
+        // Send the UDP "PING" and wait for "ACK" response
+        let ping_result = send_udp_ping(&ip).await;
+
+        // Send the result back to the client
+        if ping_result {
+            println!("IP for client {} is reachable: {}", client_id, ip);
+        } else {
+            println!("IP for client {} is unreachable: {}", client_id, ip);
+            remove_client_from_sheet(&sheets_client, access_token.clone(), client_id).await?;
+            
+        }
+    } else {
+        println!("Client {} not found", client_id);
+    }
+
+    Ok(())
+}
+
+async fn send_udp_ping(ip: &str) -> bool {
+    // Bind to a local UDP socket
+    let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap(); // Local port is automatically chosen
+
+    // Prepare the "PING" message
+    let ping_message = b"PING";
+
+    // Send the "PING" message to the target IP (port 12345 for example)
+    let target_addr = format!("{}:12345", ip);
+    if socket.send_to(ping_message, target_addr).await.is_err() {
+        println!("Failed to send PING message to {}", ip);
+        return false;
+    }
+
+    // Wait for the "ACK" response with a timeout of 2 seconds
+    let timeout_duration = Duration::from_secs(2);
+    let mut buf = [0; 1024]; // Allocate buffer for receiving the response
+    let result = timeout(timeout_duration, socket.recv_from(&mut buf)).await;
+
+    match result {
+        Ok(Ok((n, addr))) => {
+            let response = String::from_utf8_lossy(&buf[..n]); // Corrected to use the data received
+            if response == "ACK" {
+                println!("Received ACK from {}", addr);
+                true
+            } else {
+                println!("Received unexpected response from {}: {}", addr, response);
+                false
+            }
+        }
+        Ok(Err(e)) => {
+            println!("Error receiving response: {}", e);
+            false
+        }
+        Err(_) => {
+            println!("Timed out waiting for ACK from {}", ip);
+            false
+        }
+    }
+}
+
+async fn get_client_ip_from_sheets(
+    sheets_client: &SheetsClient,
+    access_token: String,
+    client_id: &str,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
+    let range = "Sheet1!A:B"; // Two columns: client_id and client_ip
+
+    let url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
+        spreadsheet_id, range
+    );
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(url)
+        .header("Authorization", format!("Bearer {}", access_token)) // Replace with dynamic access token if necessary
+        .header("Content-Type", "application/json")
+        .body(Body::empty())?;
+
+    let res = sheets_client.request(req).await?;
+    let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Parse the JSON response and extract the IP for the given client_id
+    let data: serde_json::Value = serde_json::from_str(&body_str)?;
+
+    for row in data["values"].as_array().unwrap_or(&vec![]) {
+        if let Some(client_id_in_sheet) = row.get(0).and_then(|v| v.as_str()) {
+            if client_id_in_sheet == client_id {
+                if let Some(client_ip) = row.get(1).and_then(|v| v.as_str()) {
+                    return Ok(Some(client_ip.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None) // Return None if client_id not found
+}
 async fn handle_join_request(
     addr: std::net::SocketAddr,
     sheets_client: SheetsClient,
