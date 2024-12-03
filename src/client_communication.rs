@@ -1,41 +1,51 @@
-use hyper::{Client, Request, Body, Method};
+use crate::encryption;
+use hyper::{Body, Client, Method, Request};
 use hyper_rustls::HttpsConnector;
+use serde_json::json;
+use tokio::fs::File;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::timeout;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use serde_json::json;
 use std::error::Error;
-use std::time::Duration;
-use tokio::time::timeout;
 
 type SheetsClient = Arc<Client<HttpsConnector<hyper::client::HttpConnector>, Body>>;
 
+// Function to listen for incoming requests from clients
 pub async fn listen_for_requests(
     client_socket: Arc<TcpListener>,
     sheets_client: SheetsClient,
     access_token: String,
+    request_count: Arc<Mutex<u32>>,  // Shared request count
 ) -> Result<(), Box<dyn Error>> {
     println!("Server running on port 8081...");
+
+    // Create a channel for passing encryption tasks to workers
 
     loop {
         let (socket, addr) = client_socket.accept().await?;
         let sheets_client_clone = Arc::clone(&sheets_client);
         let token_clone = access_token.clone();
+        let request_count_clone = Arc::clone(&request_count);  // Clone the request_count Arc for each client
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, addr, sheets_client_clone, token_clone).await {
+            if let Err(e) = handle_client(socket, addr, sheets_client_clone, token_clone, request_count_clone).await {
                 eprintln!("Error handling client {}: {}", addr, e);
             }
         });
     }
 }
 
+// Client request handler that processes each incoming command
 async fn handle_client(
     mut socket: TcpStream,
     addr: std::net::SocketAddr,
     sheets_client: SheetsClient,
     access_token: String,
+    request_count: Arc<Mutex<u32>>,  // Shared request count
 ) -> Result<(), Box<dyn Error>> {
     let mut buf = vec![0u8; 1024];
     let n = socket.read(&mut buf).await?;
@@ -43,32 +53,92 @@ async fn handle_client(
         return Ok(());
     }
 
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let parts: Vec<&str> = request.split_whitespace().collect();
+    let request = String::from_utf8_lossy(&buf[..n]).to_string();  // Create full String here
+    let parts: Vec<String> = request.split_whitespace().map(|s| s.to_string()).collect();  // Convert to owned Vec<String>
+    println!("Received request: {}", request);
 
     match parts.get(0) {
-        Some(&"JOIN") => handle_join_request(addr, sheets_client, access_token, &mut socket).await,
-        Some(&"REJOIN") if parts.len() > 1 => {
-            let client_id = parts[1];
+        Some(cmd) if cmd == "JOIN" => {
+            handle_join_request(addr, sheets_client, access_token, &mut socket).await
+        }
+        Some(cmd) if cmd == "REJOIN" && parts.len() > 1 => {
+            let client_id = &parts[1];
             handle_rejoin_request(client_id, addr, sheets_client, access_token, &mut socket).await
         }
-        Some(&"SIGN_OUT") if parts.len() > 1 => {
-            let client_id = parts[1];
+        Some(cmd) if cmd == "SIGN_OUT" && parts.len() > 1 => {
+            let client_id = &parts[1];
             handle_sign_out_request(client_id, sheets_client, access_token, &mut socket).await
         }
-        Some(&"SHOW_ACTIVE_CLIENTS") => {
+        Some(cmd) if cmd == "SHOW_ACTIVE_CLIENTS" => {
             handle_show_active_clients_request(addr, sheets_client, access_token, &mut socket).await
         }
-        Some(&"UNREACHABLE") if parts.len() > 1 => {
-            let client_id = parts[1];
+        Some(cmd) if cmd == "UNREACHABLE" && parts.len() > 1 => {
+            let client_id = &parts[1];
             handle_unreachable_id(client_id, sheets_client, access_token).await
         }
+        Some(cmd) if cmd == "ENCRYPTION" => {
+            // Step 1: Acknowledge the ENCRYPTION command
+            let ack_response = "ACK";
+            if let Err(e) = socket.write_all(ack_response.as_bytes()).await {
+                eprintln!("Failed to send acknowledgment: {}", e);
+                return Ok(());
+            }
+            socket.flush().await?;
+            println!("Acknowledgment sent for ENCRYPTION command.");
+        
+            // Step 2: Handle the image data
+            let mut image_data: Vec<u8> = Vec::new();
+            let mut buf = vec![0u8; 1024];  // Buffer to read data in chunks
+            loop {
+                let n = socket.read(&mut buf).await?;
+                if n == 0 {
+                    break;  // End of image data stream
+                }
+                println!("Received {} bytes of image data.", n);  // Debug: log received data size
+                image_data.extend_from_slice(&buf[..n]);  // Append the received data
+            }
+        
+            if image_data.is_empty() {
+                eprintln!("No image data received.");
+                return Ok(());
+            }
+        
+            // Step 3: Save the received image (just for demonstration)
+            let received_image_path = "received_image.png";
+            let mut file = tokio::fs::File::create(received_image_path).await?;
+            file.write_all(&image_data).await?;
+            println!("Received image and saved as: {}", received_image_path);
+        
+            // Here you could process the image (e.g., encryption)
+            // Example: encrypt_image(&image_data) or any other image processing logic
+        
+            // Step 4: Send back a response or acknowledgment after processing
+            let response = "Image received and processed.";
+            if let Err(e) = socket.write_all(response.as_bytes()).await {
+                eprintln!("Failed to send response: {}", e);
+                return Ok(());
+            }
+        
+            // Increment request count (if needed)
+            {
+                let mut count = request_count.lock().await;
+                *count += 1;
+                println!("Request count incremented to: {}", *count);
+            }
+        
+            Ok(())
+        }
+        
+        
         _ => {
             eprintln!("Invalid request received: {}", request);
             Ok(())
         }
     }
 }
+
+
+
 
 async fn handle_unreachable_id(
     client_id: &str,

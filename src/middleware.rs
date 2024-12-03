@@ -4,11 +4,18 @@ use yup_oauth2::{read_service_account_key, ServiceAccountAuthenticator};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use std::error::Error;
+use tokio::sync::Mutex;
+
 
 mod client_communication;
+mod encryption;
+
+pub use encryption::*;
+
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let request_count = Arc::new(Mutex::new(0));
     // Load the service account key
     let secret = read_service_account_key("blissful-glass-443215-m6-77d5314689de.json").await?;
 
@@ -37,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Start the TCP listener
     let listener = TcpListener::bind("0.0.0.0:8081").await?;
-    client_communication::listen_for_requests(Arc::new(listener), sheets_client, access_token.to_string()).await?;
+    client_communication::listen_for_requests(Arc::new(listener), sheets_client, access_token.to_string(), request_count).await?;
 
     Ok(())
 }
