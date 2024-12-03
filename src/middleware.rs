@@ -9,8 +9,10 @@ use tokio::sync::Mutex;
 
 mod client_communication;
 mod encryption;
+mod dos_handling;
 
 pub use encryption::*;
+pub use dos_handling::*;
 
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
