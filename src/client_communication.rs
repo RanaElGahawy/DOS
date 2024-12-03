@@ -144,7 +144,7 @@ async fn get_client_ip_from_sheets(
     client_id: &str,
 ) -> Result<Option<String>, Box<dyn Error>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "Sheet1!A:B"; // Two columns: client_id and client_ip
+    let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
 
     let url = format!(
         "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
@@ -177,6 +177,7 @@ async fn get_client_ip_from_sheets(
 
     Ok(None) // Return None if client_id not found
 }
+
 async fn handle_join_request(
     addr: std::net::SocketAddr,
     sheets_client: SheetsClient,
@@ -236,7 +237,7 @@ async fn add_client_to_dos(
     client_ip: String, // Updated parameter name for clarity
 ) -> Result<bool, Box<dyn Error>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "Sheet1!A:B"; // Two columns: client_id and client_ip
+    let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
 
     // Prepare the data to append
     let values = json!({
@@ -282,7 +283,7 @@ async fn readd_client_to_dos(
     client_ip: String,
 ) -> Result<bool, Box<dyn Error>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "Sheet1!A:B"; // Two columns: client_id and client_ip
+    let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
 
     // First, check if the client_id already exists in the sheet
     let url = format!(
@@ -340,7 +341,7 @@ async fn readd_client_to_dos(
         });
 
         let update_url = format!(
-            "https://sheets.googleapis.com/v4/spreadsheets/{}/values/Sheet1!A{}:B{}?valueInputOption=RAW",
+            "https://sheets.googleapis.com/v4/spreadsheets/{}/values/OnlineClients!A{}:B{}?valueInputOption=RAW",
             spreadsheet_id,
             row_index, // Row to update (1-based index)
             row_index
@@ -409,7 +410,7 @@ async fn remove_client_from_sheet(
     client_id: &str,
 ) -> Result<bool, Box<dyn Error>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "Sheet1!A:C"; // Adjust this range to match your sheet structure.
+    let range = "OnlineClients!A:C"; // Adjust this range to match your sheet structure.
 
     // Fetch the data to locate the client ID
     let url = format!(
@@ -493,7 +494,7 @@ async fn handle_show_active_clients_request(
     socket: &mut TcpStream,
 ) -> Result<(), Box<dyn Error>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "Sheet1!A:B"; // Two columns: client_id and ip
+    let range = "OnlineClients!A:B"; // Two columns: client_id and ip
 
     // Fetch data from Google Sheets
     let url = format!(
