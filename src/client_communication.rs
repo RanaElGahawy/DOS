@@ -77,7 +77,7 @@ async fn handle_client(
             handle_unreachable_id(client_id, sheets_client, access_token).await
         }
         Some(cmd) if cmd == "ENCRYPTION" => {
-            // Step 1: Acknowledge the ENCRYPTION command
+            // Acknowledge the ENCRYPTION command
             let ack_response = "ACK";
             if let Err(e) = socket.write_all(ack_response.as_bytes()).await {
                 eprintln!("Failed to send acknowledgment: {}", e);
@@ -86,49 +86,44 @@ async fn handle_client(
             socket.flush().await?;
             println!("Acknowledgment sent for ENCRYPTION command.");
         
-            // Step 2: Handle the image data
-            let mut image_data: Vec<u8> = Vec::new();
-            let mut buf = vec![0u8; 1024];  // Buffer to read data in chunks
-            loop {
-                let n = socket.read(&mut buf).await?;
-                if n == 0 {
-                    break;  // End of image data stream
-                }
-                println!("Received {} bytes of image data.", n);  // Debug: log received data size
-                image_data.extend_from_slice(&buf[..n]);  // Append the received data
-            }
+            // Step 1: Read the length prefix (4 bytes)
+            let mut len_buf = [0u8; 4];
+            socket.read_exact(&mut len_buf).await?;
+            let data_length = u32::from_be_bytes(len_buf) as usize;
+            println!("Expecting {} bytes of image data.", data_length);
         
-            if image_data.is_empty() {
-                eprintln!("No image data received.");
-                return Ok(());
-            }
+            // Step 2: Read the image data based on the length prefix
+            let mut image_data = vec![0u8; data_length];
+            socket.read_exact(&mut image_data).await?;
+            println!("Received {} bytes of image data.", image_data.len());
         
-            // Step 3: Save the received image (just for demonstration)
+            // Step 3: Save the received image (for demonstration)
             let received_image_path = "received_image.png";
+            let encoded_file_name = "encoded.png";
             let mut file = tokio::fs::File::create(received_image_path).await?;
             file.write_all(&image_data).await?;
             println!("Received image and saved as: {}", received_image_path);
-        
-            // Here you could process the image (e.g., encryption)
-            // Example: encrypt_image(&image_data) or any other image processing logic
-        
-            // Step 4: Send back a response or acknowledgment after processing
-            let response = "Image received and processed.";
-            if let Err(e) = socket.write_all(response.as_bytes()).await {
-                eprintln!("Failed to send response: {}", e);
-                return Ok(());
-            }
-        
+            
             // Increment request count (if needed)
             {
                 let mut count = request_count.lock().await;
                 *count += 1;
                 println!("Request count incremented to: {}", *count);
             }
+            
+            // Process and send back the encoded image
+            encryption::encode_and_send(
+                received_image_path.to_string(),
+                encoded_file_name.to_string(),
+                &mut socket,
+                request_count.clone(),
+            )
+            .await?;
+        
+            println!("Response sent to client.");
         
             Ok(())
         }
-        
         
         _ => {
             eprintln!("Invalid request received: {}", request);

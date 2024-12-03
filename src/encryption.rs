@@ -11,7 +11,7 @@ use steganography::encoder;
 pub async fn encode_and_send(
     file_name: String,
     encoded_file_name: String,
-    mut socket: TcpStream,
+    socket: &mut TcpStream,
     request_count: Arc<Mutex<u32>>,
  ) -> io::Result<()> {
     println!("Starting encoding for: {}", file_name);
