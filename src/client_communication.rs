@@ -10,23 +10,35 @@ use std::error::Error;
 
 type SheetsClient = Arc<Client<HttpsConnector<hyper::client::HttpConnector>, Body>>;
 
-// Function to listen for incoming requests from clients
 pub async fn listen_for_requests(
     client_socket: Arc<TcpListener>,
     sheets_client: SheetsClient,
     access_token: String,
     request_count: Arc<Mutex<u32>>,  // Shared request count
+    is_leader: Arc<Mutex<bool>>,    // Shared is_leader flag
 ) -> Result<(), Box<dyn Error>> {
     println!("Server running on port 8081...");
 
-    // Create a channel for passing encryption tasks to workers
-
     loop {
+        // Check if the server is the leader
+        let is_leader_status = {
+            let leader_guard = is_leader.lock().await; // Lock the is_leader flag
+            *leader_guard
+        };
+
+        if !is_leader_status {
+            println!("Server is not the leader. Waiting...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Wait and retry
+            continue;
+        }
+
+        // Accept incoming client connections
         let (socket, addr) = client_socket.accept().await?;
         let sheets_client_clone = Arc::clone(&sheets_client);
         let token_clone = access_token.clone();
-        let request_count_clone = Arc::clone(&request_count);  // Clone the request_count Arc for each client
+        let request_count_clone = Arc::clone(&request_count);
 
+        // Spawn a task to handle the client
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, addr, sheets_client_clone, token_clone, request_count_clone).await {
                 eprintln!("Error handling client {}: {}", addr, e);
