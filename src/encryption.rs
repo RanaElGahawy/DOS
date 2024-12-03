@@ -11,7 +11,7 @@ use steganography::encoder;
 pub async fn encode_and_send(
     file_name: String,
     encoded_file_name: String,
-    socket: &mut TcpStream,
+    shared_socket: Arc<Mutex<TcpStream>>,
     request_count: Arc<Mutex<u32>>,
  ) -> io::Result<()> {
     println!("Starting encoding for: {}", file_name);
@@ -26,13 +26,15 @@ pub async fn encode_and_send(
     };
  
     println!("Encoding completed. Sending back encoded image: {}", encoded_image_path);
- 
+    let mut socket = shared_socket.lock().await;
+
     // Step 2: Send the encoded image back to the client
     let mut file = fs::File::open(&encoded_image_path).await?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).await?;
  
     socket.write_all(&buffer).await?;
+    socket.flush().await?;
     println!("Sent encoded image: {}", encoded_file_name);
  
     // Delete the images after sending

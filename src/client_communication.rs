@@ -35,95 +35,174 @@ pub async fn listen_for_requests(
     }
 }
 
-// Client request handler that processes each incoming command
 async fn handle_client(
-    mut socket: TcpStream,
+    socket: TcpStream,
     addr: std::net::SocketAddr,
     sheets_client: SheetsClient,
     access_token: String,
-    request_count: Arc<Mutex<u32>>,  // Shared request count
+    request_count: Arc<Mutex<u32>>, // Shared request count
 ) -> Result<(), Box<dyn Error>> {
+    let socket = Arc::new(Mutex::new(socket)); // Wrap socket in Arc<Mutex> for shared access
     let mut buf = vec![0u8; 1024];
-    let n = socket.read(&mut buf).await?;
+
+    let n = socket.lock().await.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
     }
 
-    let request = String::from_utf8_lossy(&buf[..n]).to_string();  // Create full String here
-    let parts: Vec<String> = request.split_whitespace().map(|s| s.to_string()).collect();  // Convert to owned Vec<String>
+    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+    let parts: Vec<String> = request.split_whitespace().map(|s| s.to_string()).collect();
     println!("Received request: {}", request);
 
     match parts.get(0) {
         Some(cmd) if cmd == "JOIN" => {
-            dos_handling::handle_join_request(addr, sheets_client, access_token, &mut socket).await
+            let sheets_client = Arc::clone(&sheets_client);
+            let access_token = access_token.clone();
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                if let Err(e) =
+                    dos_handling::handle_join_request(addr, sheets_client, access_token, &mut *socket.lock().await)
+                        .await
+                {
+                    eprintln!("Failed to handle JOIN request: {}", e);
+                }
+            });
         }
         Some(cmd) if cmd == "REJOIN" && parts.len() > 1 => {
-            let client_id = &parts[1];
-            dos_handling::handle_rejoin_request(client_id, addr, sheets_client, access_token, &mut socket).await
+            let client_id = parts[1].clone();
+            let sheets_client = Arc::clone(&sheets_client);
+            let access_token = access_token.clone();
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                if let Err(e) = dos_handling::handle_rejoin_request(
+                    &client_id,
+                    addr,
+                    sheets_client,
+                    access_token,
+                    &mut *socket.lock().await,
+                )
+                .await
+                {
+                    eprintln!("Failed to handle REJOIN request: {}", e);
+                }
+            });
         }
         Some(cmd) if cmd == "SIGN_OUT" && parts.len() > 1 => {
-            let client_id = &parts[1];
-            dos_handling::handle_sign_out_request(client_id, sheets_client, access_token, &mut socket).await
+            let client_id = parts[1].clone();
+            let sheets_client = Arc::clone(&sheets_client);
+            let access_token = access_token.clone();
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                if let Err(e) = dos_handling::handle_sign_out_request(
+                    &client_id,
+                    sheets_client,
+                    access_token,
+                    &mut *socket.lock().await,
+                )
+                .await
+                {
+                    eprintln!("Failed to handle SIGN_OUT request: {}", e);
+                }
+            });
         }
         Some(cmd) if cmd == "SHOW_ACTIVE_CLIENTS" => {
-            dos_handling::handle_show_active_clients_request(addr, sheets_client, access_token, &mut socket).await
+            let sheets_client = Arc::clone(&sheets_client);
+            let access_token = access_token.clone();
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                if let Err(e) = dos_handling::handle_show_active_clients_request(
+                    addr,
+                    sheets_client,
+                    access_token,
+                    &mut *socket.lock().await,
+                )
+                .await
+                {
+                    eprintln!("Failed to handle SHOW_ACTIVE_CLIENTS request: {}", e);
+                }
+            });
         }
         Some(cmd) if cmd == "UNREACHABLE" && parts.len() > 1 => {
-            let client_id = &parts[1];
-            dos_handling::handle_unreachable_id(client_id, sheets_client, access_token).await
+            let client_id = parts[1].clone();
+            let sheets_client = Arc::clone(&sheets_client);
+            let access_token = access_token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = dos_handling::handle_unreachable_id(&client_id, sheets_client, access_token).await {
+                    eprintln!("Failed to handle UNREACHABLE request: {}", e);
+                }
+            });
         }
         Some(cmd) if cmd == "ENCRYPTION" => {
-            // Acknowledge the ENCRYPTION command
-            let ack_response = "ACK";
-            if let Err(e) = socket.write_all(ack_response.as_bytes()).await {
-                eprintln!("Failed to send acknowledgment: {}", e);
-                return Ok(());
-            }
-            socket.flush().await?;
-            println!("Acknowledgment sent for ENCRYPTION command.");
-        
-            // Step 1: Read the length prefix (4 bytes)
-            let mut len_buf = [0u8; 4];
-            socket.read_exact(&mut len_buf).await?;
-            let data_length = u32::from_be_bytes(len_buf) as usize;
-            println!("Expecting {} bytes of image data.", data_length);
-        
-            // Step 2: Read the image data based on the length prefix
-            let mut image_data = vec![0u8; data_length];
-            socket.read_exact(&mut image_data).await?;
-            println!("Received {} bytes of image data.", image_data.len());
-        
-            // Step 3: Save the received image (for demonstration)
-            let received_image_path = "received_image.png";
-            let encoded_file_name = "encoded.png";
-            let mut file = tokio::fs::File::create(received_image_path).await?;
-            file.write_all(&image_data).await?;
-            println!("Received image and saved as: {}", received_image_path);
-            
-            // Increment request count (if needed)
-            {
-                let mut count = request_count.lock().await;
-                *count += 1;
-                println!("Request count incremented to: {}", *count);
-            }
-
-            // Process and send back the encoded image
-            encryption::encode_and_send(
-                received_image_path.to_string(),
-                encoded_file_name.to_string(),
-                &mut socket,
-                request_count.clone(),
-            )
-            .await?;
-        
-            println!("Response sent to client.");
-        
-            Ok(())
+            let request_count = Arc::clone(&request_count);
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                if let Err(e) = handle_encryption(socket, addr, request_count).await {
+                    eprintln!("Failed to handle ENCRYPTION request: {}", e);
+                }
+            });
         }
-        
         _ => {
             eprintln!("Invalid request received: {}", request);
-            Ok(())
         }
     }
+
+    Ok(())
+}
+
+
+async fn handle_encryption(
+    socket: Arc<Mutex<TcpStream>>,
+    addr: std::net::SocketAddr,
+    request_count: Arc<Mutex<u32>>,
+) -> Result<(), Box<dyn Error>> {
+    // Acknowledge the ENCRYPTION command
+    {
+        let mut socket = socket.lock().await;
+        let ack_response = "ACK";
+        socket.write_all(ack_response.as_bytes()).await?;
+        socket.flush().await?;
+        println!("Acknowledgment sent for ENCRYPTION command.");
+    }
+
+    // Step 1: Read the length prefix (4 bytes)
+    let mut len_buf = [0u8; 4];
+    {
+        let mut socket = socket.lock().await;
+        socket.read_exact(&mut len_buf).await?;
+    }
+    let data_length = u32::from_be_bytes(len_buf) as usize;
+    println!("Expecting {} bytes of image data.", data_length);
+
+    // Step 2: Read the image data
+    let mut image_data = vec![0u8; data_length];
+    {
+        let mut socket = socket.lock().await;
+        socket.read_exact(&mut image_data).await?;
+    }
+    println!("Received {} bytes of image data.", image_data.len());
+
+    // Save the received image
+    let received_image_path = format!("received_{}.png", addr.port());
+    let encoded_file_name = format!("encoded_{}.png", addr.port());
+    tokio::fs::write(&received_image_path, &image_data).await?;
+    println!("Received image and saved as: {}", received_image_path);
+
+    // Increment request count
+    {
+        let mut count = request_count.lock().await;
+        *count += 1;
+        println!("Request count incremented to: {}", *count);
+    }
+
+    // Process and send back the encoded image
+    encryption::encode_and_send(
+        received_image_path,
+        encoded_file_name,
+        socket, // Pass the Arc<Mutex<TcpStream>> directly
+        Arc::clone(&request_count),
+    )
+    .await?;
+
+    println!("Response sent to client.");
+    Ok(())
 }
