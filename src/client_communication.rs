@@ -80,6 +80,37 @@ async fn handle_client(
                 }
             });
         }
+        Some(cmd) if cmd == "UPDATE" && parts.len() == 4 => {
+            let client_id = parts[1].clone();
+            let image_name = parts[2].clone();
+            let new_access_rights = parts[3].parse::<u8>().unwrap_or(0);
+            
+            if new_access_rights < 1 || new_access_rights > 5 {
+            eprintln!("Invalid access rights received in UPDATE request: {}",
+            new_access_rights);
+            } else {
+            tokio::spawn({
+            let sheets_client_clone = Arc::clone(&sheets_client);
+            let token_clone = access_token.clone();
+            async move {
+            if let Err(e) = handle_update_request(
+            &client_id,
+            &image_name,
+            new_access_rights,
+            sheets_client_clone,
+            token_clone,
+            )
+            .await
+            {
+            eprintln!(
+            "Failed to process UPDATE request for client {}: {}",
+            client_id, e
+            );
+            }
+            }
+            });
+            }
+            }            
         Some(cmd) if cmd == "REJOIN" && parts.len() > 1 => {
             let client_id = parts[1].clone();
             let sheets_client = Arc::clone(&sheets_client);
@@ -218,3 +249,31 @@ async fn handle_encryption(
     println!("Response sent to client.");
     Ok(())
 }
+
+async fn handle_update_request(
+    client_id: &str,
+    image_name: &str,
+    new_access_rights: u8,
+    sheets_client: SheetsClient,
+    access_token: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    
+    // Notify Google Sheets about the failed update
+    dos_handling::notify_update_failure(
+    client_id,
+    image_name,
+    new_access_rights,
+    sheets_client,
+    access_token,
+    )
+    .await?;
+    
+    println!(
+    "UPDATE request for client '{}' and image '{}' with new rights '{}'
+    processed successfully.",
+    client_id, image_name, new_access_rights
+    );
+    
+    Ok(())
+}
+    

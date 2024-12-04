@@ -2,6 +2,7 @@ use hyper::{Body, Client, Method, Request};
 use hyper_rustls::HttpsConnector;
 use serde_json::json;
 use tokio::{io::AsyncWriteExt, sync::Mutex, time::timeout};
+use tokio::io::AsyncReadExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -145,29 +146,91 @@ pub async fn handle_rejoin_request(
 
     // Re-add the client to the system
     if readd_client_to_dos(&sheets_client, access_token.clone(), client_id, ip.clone()).await? {
+        // Check AccessRights sheet and send updates if necessary
         if let Some(updates) = check_access_rights(&sheets_client, access_token, client_id).await? {
-            let response = format!("REJOIN_SUCCESS {}\n", updates.len());
-            let mut locked_socket = socket.lock().await;
-            locked_socket.write_all(response.as_bytes()).await?;
-            locked_socket.flush().await?;
-            println!("Rejoin success sent with update count: {}", updates.len());
-            
-            // Send updates immediately after REJOIN_SUCCESS
+            let update_count = updates.len();
+    
+            {
+                let mut locked_socket = socket.lock().await;
+                let ack_message = format!("REJOIN_SUCCESS {}\n", update_count);
+                locked_socket.write_all(ack_message.as_bytes()).await?;
+                locked_socket.flush().await?;
+                println!("Sent ACK with update count: {}", update_count);
+            }
+    
+            // Wait for 10 seconds before receiving "READY_FOR_UPDATES"
+            println!("Waiting for client to send READY_FOR_UPDATES...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    
+            // Wait for "READY_FOR_UPDATES"
+            loop {
+                let mut buffer = [0u8; 128];
+                let mut locked_socket = socket.lock().await;
+                match locked_socket.read(&mut buffer).await {
+                    Ok(0) => {
+                        println!("Connection closed by client.");
+                        return Ok(());
+                    }
+                    Ok(n) => {
+                        let message = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
+                        if message == "READY_FOR_UPDATES" {
+                            println!("Received acknowledgment from client: READY_FOR_UPDATES");
+                            break;
+                        } else {
+                            println!("Unexpected message from client: {}", message);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading from client: {}", e);
+                        return Ok(());
+                    }
+                }
+            }
+    
+            // Send updates
             for (image_id, new_access_rights) in updates {
                 let update_message = format!("UPDATE {} {}\n", image_id, new_access_rights);
+                let mut locked_socket = socket.lock().await;
                 locked_socket.write_all(update_message.as_bytes()).await?;
                 locked_socket.flush().await?;
                 println!("Sent update: {}", update_message);
             }
-            
-
+    
+            println!("All updates sent.");
         } else {
             let mut locked_socket = socket.lock().await;
             locked_socket.write_all(b"REJOIN_FAILED\n").await?;
             locked_socket.flush().await?;
             println!("Failed to rejoin client: {}", client_id);
         }
-    }
+    
+        // Keep the connection open for further communication
+        loop {
+            let mut buffer = [0u8; 128];
+            let mut locked_socket = socket.lock().await;
+            match locked_socket.read(&mut buffer).await {
+                Ok(0) => {
+                    println!("Connection closed by client.");
+                    break;
+                }
+                Ok(n) => {
+                    let message = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
+                    println!("Received message from client: {}", message);
+    
+                    // Handle additional client messages here
+                }
+                Err(e) => {
+                    eprintln!("Error reading from client: {}", e);
+                    break;
+                }
+            }
+        }
+    } else {
+        let mut locked_socket = socket.lock().await;
+        locked_socket.write_all(b"REJOIN_FAILED\n").await?;
+        locked_socket.flush().await?;
+        println!("Failed to rejoin client: {}", client_id);
+    }    
 
     Ok(())
 }
@@ -612,4 +675,50 @@ pub async fn handle_show_active_clients_request(
     );
 
     Ok(())
+}
+
+pub async fn notify_update_failure(
+    client_id: &str,
+    image_name: &str,
+    new_access_rights: u8,
+    sheets_client: SheetsClient,
+    access_token: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
+    let range = "AccessRights!A:C"; // Adjust as needed
+    
+    // Prepare the data to append
+    let values = serde_json::json!({
+    "values": [[client_id, image_name, new_access_rights.to_string()]]
+    });
+    
+    let url = format!(
+    "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:append?valueInputOption=RAW",
+    spreadsheet_id, range
+    );
+    
+    // Create the HTTP request to append data
+    let req = hyper::Request::builder()
+    .method(hyper::Method::POST)
+    .uri(url)
+    .header("Authorization", format!("Bearer {}", access_token))
+    .header("Content-Type", "application/json")
+    .body(hyper::Body::from(values.to_string()))?;
+    
+    // Send the request
+    let res = sheets_client.request(req).await?;
+    
+    // Handle the response
+    if res.status().is_success() {
+    println!(
+    "Successfully logged UPDATE failure for client_id: {}, image_name: {},
+    new_access_rights: {}",
+    client_id, image_name, new_access_rights
+    );
+    Ok(())
+    } else {
+    let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+    let error_message = String::from_utf8_lossy(&body_bytes);
+    Err(format!("Failed to log UPDATE failure: {}", error_message).into())
+    }
 }
