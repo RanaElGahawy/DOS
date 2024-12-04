@@ -175,6 +175,36 @@ async fn handle_client(
                 }
             });
         }
+        Some(cmd) if cmd == "UPDATE" && parts.len() == 4 => {
+            let client_id = parts[1].clone();
+            let image_name = parts[2].clone();
+            let new_access_rights = parts[3].parse::<u8>().unwrap_or(0);
+
+            if new_access_rights < 1 || new_access_rights > 5 {
+                eprintln!("Invalid access rights received in UPDATE request: {}", new_access_rights);
+            } else {
+                tokio::spawn({
+                    let sheets_client_clone = Arc::clone(&sheets_client);
+                    let token_clone = access_token.clone();
+                    async move {
+                        if let Err(e) = handle_update_request(
+                            &client_id,
+                            &image_name,
+                            new_access_rights,
+                            sheets_client_clone,
+                            token_clone,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "Failed to process UPDATE request for client {}: {}",
+                                client_id, e
+                            );
+                        }
+                    }
+                });
+            }
+        }
         Some(cmd) if cmd == "ENCRYPTION" => {
             let request_count = Arc::clone(&request_count);
             let socket = Arc::clone(&socket);
