@@ -613,3 +613,47 @@ pub async fn handle_show_active_clients_request(
 
     Ok(())
 }
+pub async fn notify_update_failure(
+    client_id: &str,
+    image_name: &str,
+    new_access_rights: u8,
+    sheets_client: SheetsClient,
+    access_token: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
+    let range = "AccessRights!A:C"; // Adjust as needed
+
+    // Prepare the data to append
+    let values = serde_json::json!({
+        "values": [[client_id, image_name, new_access_rights.to_string()]]
+    });
+
+    let url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:append?valueInputOption=RAW",
+        spreadsheet_id, range
+    );
+
+    // Create the HTTP request to append data
+    let req = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .body(hyper::Body::from(values.to_string()))?;
+
+    // Send the request
+    let res = sheets_client.request(req).await?;
+
+    // Handle the response
+    if res.status().is_success() {
+        println!(
+            "Successfully logged UPDATE failure for client_id: {}, image_name: {}, new_access_rights: {}",
+            client_id, image_name, new_access_rights
+        );
+        Ok(())
+    } else {
+        let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+        let error_message = String::from_utf8_lossy(&body_bytes);
+        Err(format!("Failed to log UPDATE failure: {}", error_message).into())
+    }
+}
