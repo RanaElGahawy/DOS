@@ -27,7 +27,7 @@ pub async fn listen_for_requests(
         };
 
         if !is_leader_status {
-            println!("Server is not the leader. Waiting...");
+            // println!("Server is not the leader. Waiting...");
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await; // Wait and retry
             continue;
         }
@@ -53,7 +53,7 @@ async fn handle_client(
     sheets_client: SheetsClient,
     access_token: String,
     request_count: Arc<Mutex<u32>>, // Shared request count
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket = Arc::new(Mutex::new(socket)); // Wrap socket in Arc<Mutex> for shared access
     let mut buf = vec![0u8; 1024];
 
@@ -91,7 +91,7 @@ async fn handle_client(
                     addr,
                     sheets_client,
                     access_token,
-                    &mut *socket.lock().await,
+                    socket,
                 )
                 .await
                 {

@@ -24,10 +24,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let sender_id: u16 = 1;
+    let sender_id: u16 = 2;
 
     // Load the service account key
-    let secret = read_service_account_key("blissful-glass-443215-m6-77d5314689de.json").await?;
+    let secret = read_service_account_key("blissful-glass-443215-m6-0b9db53879b6.json").await?;
 
     // Create an HTTPS connector
     let https_connector: HttpsConnector<hyper::client::HttpConnector> = HttpsConnectorBuilder::new()

@@ -1,7 +1,7 @@
 use hyper::{Body, Client, Method, Request};
 use hyper_rustls::HttpsConnector;
 use serde_json::json;
-use tokio::{io::AsyncWriteExt, time::timeout};
+use tokio::{io::AsyncWriteExt, sync::Mutex, time::timeout};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,89 +139,147 @@ pub async fn handle_rejoin_request(
     addr: std::net::SocketAddr,
     sheets_client: SheetsClient,
     access_token: String,
-    socket: &mut TcpStream,
-) -> Result<(), Box<dyn Error>> {
+    socket: Arc<Mutex<TcpStream>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ip = addr.ip().to_string();
 
-    if readd_client_to_dos(&sheets_client, access_token, client_id, ip.clone()).await? {
-        socket.write_all(b"REJOIN_SUCCESS").await?;
-        println!("Client rejoined: {}", client_id);
-    } else {
-        socket.write_all(b"REJOIN_FAILED").await?;
-        println!("Failed to rejoin client: {}", client_id);
+    // Re-add the client to the system
+    if readd_client_to_dos(&sheets_client, access_token.clone(), client_id, ip.clone()).await? {
+        if let Some(updates) = check_access_rights(&sheets_client, access_token, client_id).await? {
+            let response = format!("REJOIN_SUCCESS {}\n", updates.len());
+            let mut locked_socket = socket.lock().await;
+            locked_socket.write_all(response.as_bytes()).await?;
+            locked_socket.flush().await?;
+            println!("Rejoin success sent with update count: {}", updates.len());
+            
+            // Send updates immediately after REJOIN_SUCCESS
+            for (image_id, new_access_rights) in updates {
+                let update_message = format!("UPDATE {} {}\n", image_id, new_access_rights);
+                locked_socket.write_all(update_message.as_bytes()).await?;
+                locked_socket.flush().await?;
+                println!("Sent update: {}", update_message);
+            }
+            
+
+        } else {
+            let mut locked_socket = socket.lock().await;
+            locked_socket.write_all(b"REJOIN_FAILED\n").await?;
+            locked_socket.flush().await?;
+            println!("Failed to rejoin client: {}", client_id);
+        }
     }
 
     Ok(())
 }
 
-pub async fn handle_sign_out_request(
-    client_id: &str,
-    sheets_client: SheetsClient,
-    access_token: String,
-    socket: &mut TcpStream,
-) -> Result<(), Box<dyn Error>> {
-    if remove_client_from_sheet(&sheets_client, access_token, client_id).await? {
-        socket.write_all(b"ACK").await?;
-        println!("Client signed out: {}", client_id);
-    } else {
-        socket.write_all(b"NAK").await?;
-        println!("Failed to sign out client: {}", client_id);
-    }
-    Ok(())
-}
 
-pub async fn add_client_to_dos(
+pub async fn check_access_rights(
     sheets_client: &SheetsClient,
     access_token: String,
     client_id: &str,
-    client_ip: String, // Updated parameter name for clarity
-) -> Result<bool, Box<dyn Error>> {
-    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
-    let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
+) -> Result<Option<Vec<(String, u8)>>, Box<dyn std::error::Error + Send + Sync>> {
+    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg"; // Replace with your spreadsheet ID
+    let range = "AccessRights!A:C"; // Columns: client_id, image_id, update
 
-    // Prepare the data to append
-    let values = json!({
-        "values": [[client_id, client_ip]]
-    });
-
-    // Build the request URL for appending data
+    // Fetch the AccessRights sheet
     let url = format!(
-        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:append?valueInputOption=RAW",
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
         spreadsheet_id, range
     );
 
-    // Create the HTTP request to append data
     let req = Request::builder()
-        .method(Method::POST)
+        .method(Method::GET)
         .uri(url)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Content-Type", "application/json")
-        .body(Body::from(values.to_string()))?;
+        .body(Body::empty())?;
 
-    // Send the request
     let res = sheets_client.request(req).await?;
-    let status = res.status();
+    let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+    let data: serde_json::Value = serde_json::from_slice(&body_bytes)?;
 
-    if status.is_success() {
-        println!("Successfully added client_id: {} with IP: {}", client_id, client_ip);
-        Ok(true)
-    } else {
-        let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
-        let body_str = String::from_utf8_lossy(&body_bytes);
-        eprintln!(
-            "Failed to add client_id: {} with IP: {}. Error: {}",
-            client_id, client_ip, body_str
-        );
-        Ok(false)
+    // Parse the rows to find updates for the client and track row indices
+    let mut rows_to_delete = vec![];
+    let rows: Vec<(String, u8)> = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+        .iter()
+        .enumerate()
+        .filter_map(|(index, v)| {
+            if let (Some(client), Some(image), Some(update)) = (
+                v.get(0).and_then(|c| c.as_str()),
+                v.get(1).and_then(|c| c.as_str()),
+                v.get(2).and_then(|c| c.as_str()),
+            ) {
+                if client == client_id {
+                    rows_to_delete.push(index); // Track rows for deletion
+                    if let Ok(update_number) = update.parse::<u8>() {
+                        return Some((image.to_string(), update_number));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(None);
     }
+
+    // Prepare the batchUpdate request to delete rows
+    let mut requests = vec![];
+    for &row_index in rows_to_delete.iter().rev() {
+        requests.push(json!({
+            "deleteDimension": {
+                "range": {
+                    "sheetId": 634996676, // Replace with the appropriate sheet ID if not the first sheet
+                    "dimension": "ROWS",
+                    "startIndex": row_index as i32,
+                    "endIndex": (row_index + 1) as i32,
+                }
+            }
+        }));
+    }
+
+    // Send the batchUpdate request
+    let delete_url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/:batchUpdate",
+        spreadsheet_id
+    );
+
+    let delete_request_body = json!({
+        "requests": requests
+    });
+
+    let delete_req = Request::builder()
+        .method(Method::POST)
+        .uri(delete_url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .body(Body::from(delete_request_body.to_string()))?;
+
+    let delete_res = sheets_client.request(delete_req).await?;
+    if !delete_res.status().is_success() {
+        let body_bytes = hyper::body::to_bytes(delete_res.into_body()).await?;
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        eprintln!("Failed to delete rows. Error: {}", body_str);
+    } else {
+        println!("Rows deleted successfully.");
+    }
+
+    Ok(Some(rows))
 }
+
+
+
 
 pub async fn readd_client_to_dos(
     sheets_client: &SheetsClient,
     access_token: String,
     client_id: &str,
     client_ip: String,
-) -> Result<bool, Box<dyn Error>> {
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
     let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
 
@@ -343,6 +401,67 @@ pub async fn readd_client_to_dos(
     }
 }
 
+pub async fn handle_sign_out_request(
+    client_id: &str,
+    sheets_client: SheetsClient,
+    access_token: String,
+    socket: &mut TcpStream,
+) -> Result<(), Box<dyn Error>> {
+    if remove_client_from_sheet(&sheets_client, access_token, client_id).await? {
+        socket.write_all(b"ACK").await?;
+        println!("Client signed out: {}", client_id);
+    } else {
+        socket.write_all(b"NAK").await?;
+        println!("Failed to sign out client: {}", client_id);
+    }
+    Ok(())
+}
+
+pub async fn add_client_to_dos(
+    sheets_client: &SheetsClient,
+    access_token: String,
+    client_id: &str,
+    client_ip: String, // Updated parameter name for clarity
+) -> Result<bool, Box<dyn Error>> {
+    let spreadsheet_id = "12SqSHonSlPVo8JXcj2Or1cmXOlEPpIjxQ64yZLOHZIg";
+    let range = "OnlineClients!A:B"; // Two columns: client_id and client_ip
+
+    // Prepare the data to append
+    let values = json!({
+        "values": [[client_id, client_ip]]
+    });
+
+    // Build the request URL for appending data
+    let url = format!(
+        "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}:append?valueInputOption=RAW",
+        spreadsheet_id, range
+    );
+
+    // Create the HTTP request to append data
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .body(Body::from(values.to_string()))?;
+
+    // Send the request
+    let res = sheets_client.request(req).await?;
+    let status = res.status();
+
+    if status.is_success() {
+        println!("Successfully added client_id: {} with IP: {}", client_id, client_ip);
+        Ok(true)
+    } else {
+        let body_bytes = hyper::body::to_bytes(res.into_body()).await?;
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        eprintln!(
+            "Failed to add client_id: {} with IP: {}. Error: {}",
+            client_id, client_ip, body_str
+        );
+        Ok(false)
+    }
+}
 
 pub async fn remove_client_from_sheet(
     sheets_client: &SheetsClient,

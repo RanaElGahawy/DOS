@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::sync::watch;
 use std::io;
 
-const ELECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const ELECTION_TIMEOUT: Duration = Duration::from_secs(6);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const TRIGGER_ELECTION: Duration = Duration::from_secs(6);
 
